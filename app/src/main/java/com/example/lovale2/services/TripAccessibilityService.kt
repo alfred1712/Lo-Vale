@@ -90,17 +90,28 @@ class TripAccessibilityService : AccessibilityService() {
         // Primera barrera: paquete exacto del evento.
         if (eventPackage != targetPackage) return
 
-        // Segunda barrera: la ventana activa también debe pertenecer a la app elegida.
-        val rootNode = rootInActiveWindow ?: return
-        val rootPackage = rootNode.packageName?.toString()?.lowercase(Locale.ROOT).orEmpty()
-        if (rootPackage.isNotBlank() && rootPackage != targetPackage) {
-            registrarCambioPrimerPlano("")
-            return
+        // Segunda barrera: obtenemos el nodo raíz para analizar.
+        // Si la ventana activa es de nuestra app, la usamos. Si no, pero el evento es de nuestra app
+        // (ej: un overlay), usamos el source del evento para no perder la oferta.
+        val activeRoot = rootInActiveWindow
+        val rootNode = if (activeRoot?.packageName?.toString()?.lowercase(Locale.ROOT) == targetPackage) {
+            activeRoot
+        } else {
+            event.source?.let { findRoot(it) }
         }
+
+        if (rootNode == null) return
         registrarCambioPrimerPlano(targetPackage)
 
         val textos = mutableListOf<String>()
-        recolectarTextos(rootNode, textos)
+        try {
+            recolectarTextos(rootNode, textos)
+        } finally {
+            if (rootNode != activeRoot) rootNode.recycle()
+            // No reciclamos activeRoot porque rootInActiveWindow lo maneja el sistema,
+            // pero si lo obtuvimos vía event.source o findRoot, sí debemos.
+        }
+        
         if (textos.isEmpty()) return
 
         val textoCompleto = textos.joinToString(" ").replace(Regex("\\s+"), " ").trim()
@@ -129,11 +140,11 @@ class TripAccessibilityService : AccessibilityService() {
     }
 
     private fun esPantallaDeOfertas(app: RideApp, texto: String): Boolean {
-        if (!contieneOferta(texto)) return false
+        if (!contieneOferta(texto, app)) return false
         return when (app) {
-            RideApp.DIDI -> texto.contains("Centro de viajes", ignoreCase = true) || texto.contains("Aceptar", ignoreCase = true)
-            RideApp.UBER -> texto.contains("Viaje:", ignoreCase = true) || texto.contains("A ", ignoreCase = true)
-            RideApp.CABIFY -> texto.contains("en app", ignoreCase = true) || texto.contains("/km", ignoreCase = true) || contarParesMinKm(texto) >= 2
+            RideApp.DIDI -> texto.contains("Centro", ignoreCase = true) || texto.contains("Aceptar", ignoreCase = true)
+            RideApp.UBER -> texto.contains("Viaje", ignoreCase = true) || texto.contains("Uber", ignoreCase = true) || texto.contains("recoger", ignoreCase = true)
+            RideApp.CABIFY -> texto.contains("app", ignoreCase = true) || texto.contains("/km", ignoreCase = true) || contarParesMinKm(texto) >= 2
         }
     }
 
@@ -187,41 +198,26 @@ class TripAccessibilityService : AccessibilityService() {
             val partes = texto.split(Regex("(?i)\\bAceptar\\b"))
                 .map { it.trim() }
                 .filter { it.isNotBlank() }
-            val candidatas = partes.filter { contieneOferta(it) }
+            val candidatas = partes.filter { contieneOferta(it, app) }
             if (candidatas.isNotEmpty()) return candidatas
         }
 
-        // Uber/Cabify suelen mostrar una sola oferta. DiDi usa este fallback
-        // cuando el botón Aceptar no aparece en el árbol de accesibilidad.
-        val pairRegex = Regex(
-            """[0-9]+(?:[.,][0-9]+)?\s*min(?:[^0-9k]{0,18})[0-9]+(?:[.,][0-9]+)?\s*(?:km|m)|[0-9]+(?:[.,][0-9]+)?\s*(?:km|m)(?:[^0-9m]{0,18})[0-9]+(?:[.,][0-9]+)?\s*min""",
-            RegexOption.IGNORE_CASE
-        )
-        val pairMatches = pairRegex.findAll(texto).toList()
-        if (app == RideApp.DIDI && pairMatches.size >= 4) {
-            val bloques = mutableListOf<String>()
-            var inicio = 0
-            for (i in 0 until pairMatches.size step 2) {
-                if (i + 1 >= pairMatches.size) break
-                val fin = if (i + 2 < pairMatches.size) pairMatches[i + 2].range.first else texto.length
-                val bloque = texto.substring(inicio, fin).trim()
-                if (contieneOferta(bloque)) bloques.add(bloque)
-                inicio = fin
-            }
-            if (bloques.isNotEmpty()) return bloques
-        }
-
-        return if (contieneOferta(texto)) listOf(texto) else emptyList()
+        // Uber/Cabify suelen mostrar una sola oferta.
+        return if (contieneOferta(texto, app)) listOf(texto) else emptyList()
     }
 
-    private fun contieneOferta(texto: String): Boolean {
+    private fun contieneOferta(texto: String, app: RideApp? = null): Boolean {
         val tienePrecio = Regex("""(?:\$|ARS)\s*[0-9]""", RegexOption.IGNORE_CASE).containsMatchIn(texto)
-        return tienePrecio && contarParesMinKm(texto) >= 2
+        val pares = contarParesMinKm(texto)
+        // Para Uber permitimos 1 solo par (min/km) porque a veces la info de recogida 
+        // tarda en aparecer o viene en otro nodo. Para el resto mantenemos 2.
+        return if (app == RideApp.UBER) tienePrecio && pares >= 1
+        else tienePrecio && pares >= 2
     }
 
     private fun contarParesMinKm(texto: String): Int {
         val pairRegex = Regex(
-            """[0-9]+(?:[.,][0-9]+)?\s*min(?:[^0-9k]{0,18})[0-9]+(?:[.,][0-9]+)?\s*(?:km|m)|[0-9]+(?:[.,][0-9]+)?\s*(?:km|m)(?:[^0-9m]{0,18})[0-9]+(?:[.,][0-9]+)?\s*min""",
+            """[0-9]+(?:[.,][0-9]+)?\s*min[^0-9k]{0,50}[0-9]+(?:[.,][0-9]+)?\s*(?:km|m)|[0-9]+(?:[.,][0-9]+)?\s*(?:km|m)[^0-9m]{0,50}[0-9]+(?:[.,][0-9]+)?\s*min""",
             RegexOption.IGNORE_CASE
         )
         return pairRegex.findAll(texto).count()
@@ -274,10 +270,22 @@ class TripAccessibilityService : AccessibilityService() {
         node.text?.toString()?.let { if (it.isNotBlank()) destino.add(it) }
         node.contentDescription?.toString()?.let { if (it.isNotBlank()) destino.add(it) }
         for (i in 0 until node.childCount) {
-            node.getChild(i)?.let { child ->
-                try { recolectarTextos(child, destino) } finally { child.recycle() }
+            val child = try { node.getChild(i) } catch (_: Exception) { null }
+            child?.let { c ->
+                try { recolectarTextos(c, destino) } finally { c.recycle() }
             }
         }
+    }
+
+    private fun findRoot(node: AccessibilityNodeInfo): AccessibilityNodeInfo {
+        var current = AccessibilityNodeInfo.obtain(node)
+        while (true) {
+            val parent = current.parent
+            if (parent == null) break
+            current.recycle()
+            current = parent
+        }
+        return current
     }
 
     private fun buildFingerprint(packageName: String, datos: DatosViaje, evaluacion: ResultadoEvaluacion): String =

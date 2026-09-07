@@ -31,10 +31,11 @@ fun MainScreen(
     viewModel: MainViewModel = viewModel()
 ) {
     val settings by viewModel.settings.collectAsState()
+    val selectedApp = settings.selectedApp
 
     var showFilterDialog by remember { mutableStateOf<String?>(null) }
     var tempFilterInput by remember { mutableStateOf("") }
-
+    
     val primaryCyan = Color(0xFF00E5FF)
     val backgroundDark = Color(0xFF070D15)
     val cardBackground = Color(0xFF0E1726)
@@ -59,14 +60,14 @@ fun MainScreen(
                 Text("Aplicación a monitorear", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    if (settings.selectedApp == null) "Elegí una plataforma antes de activar LoVale." else "LoVale solo procesará ${settings.selectedApp.label} cuando esté en primer plano.",
+                    if (selectedApp == null) "Elegí una plataforma antes de activar LoVale." else "LoVale solo procesará ${selectedApp.label} cuando esté en primer plano.",
                     color = Color(0xFF8A99AD), fontSize = 11.sp
                 )
                 Spacer(modifier = Modifier.height(10.dp))
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     RideApp.entries.forEach { app ->
                         FilterChip(
-                            selected = settings.selectedApp == app,
+                            selected = selectedApp == app,
                             onClick = {
                                 if (settings.serviceActive) viewModel.toggleService(false)
                                 viewModel.setSelectedApp(app)
@@ -98,41 +99,6 @@ fun MainScreen(
             Spacer(modifier = Modifier.height(10.dp))
         }
 
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(20.dp),
-            colors = CardDefaults.cardColors(containerColor = if (settings.serviceActive) Color(0xFF0A2E1F) else cardBackground),
-            border = BorderStroke(1.dp, if (settings.serviceActive) Color(0xFF00E676).copy(alpha = 0.5f) else borderColor)
-        ) {
-            Column(modifier = Modifier.fillMaxWidth().padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                Text(
-                    text = when {
-                        settings.serviceActive -> "Estado: Activo — ${settings.selectedApp?.label ?: "Sin plataforma"}"
-                        settings.selectedApp == null -> "Estado: Seleccioná una plataforma"
-                        else -> "Estado: Pausado — ${settings.selectedApp.label}"
-                    },
-                    color = if (settings.serviceActive) Color(0xFF00E676) else primaryCyan,
-                    fontSize = 12.sp, fontWeight = FontWeight.Bold
-                )
-                Spacer(modifier = Modifier.height(14.dp))
-                Box(
-                    modifier = Modifier.size(70.dp).clip(CircleShape)
-                        .background(if (settings.serviceActive) Color(0xFF00E676) else primaryCyan),
-                    contentAlignment = Alignment.Center
-                ) {
-                    IconButton(
-                        enabled = settings.serviceActive || settings.selectedApp != null,
-                        onClick = { viewModel.toggleService(!settings.serviceActive) }
-                    ) {
-                        Icon(
-                            imageVector = if (settings.serviceActive) Icons.Default.Pause else Icons.Default.PlayArrow,
-                            contentDescription = "Iniciar", tint = Color.Black, modifier = Modifier.size(35.dp)
-                        )
-                    }
-                }
-            }
-        }
-
         if (!overlayPermissionGranted) {
             Card(
                 modifier = Modifier.fillMaxWidth(),
@@ -147,6 +113,41 @@ fun MainScreen(
                 }
             }
             Spacer(modifier = Modifier.height(10.dp))
+        }
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(20.dp),
+            colors = CardDefaults.cardColors(containerColor = if (settings.serviceActive) Color(0xFF0A2E1F) else cardBackground),
+            border = BorderStroke(1.dp, if (settings.serviceActive) Color(0xFF00E676).copy(alpha = 0.5f) else borderColor)
+        ) {
+            Column(modifier = Modifier.fillMaxWidth().padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(
+                    text = when {
+                        settings.serviceActive -> "Estado: Activo — ${selectedApp?.label ?: "Sin plataforma"}"
+                        selectedApp == null -> "Estado: Seleccioná una plataforma"
+                        else -> "Estado: Pausado — ${selectedApp.label}"
+                    },
+                    color = if (settings.serviceActive) Color(0xFF00E676) else primaryCyan,
+                    fontSize = 12.sp, fontWeight = FontWeight.Bold
+                )
+                Spacer(modifier = Modifier.height(14.dp))
+                Box(
+                    modifier = Modifier.size(70.dp).clip(CircleShape)
+                        .background(if (settings.serviceActive) Color(0xFF00E676) else primaryCyan),
+                    contentAlignment = Alignment.Center
+                ) {
+                    IconButton(
+                        enabled = settings.serviceActive || selectedApp != null,
+                        onClick = { viewModel.toggleService(!settings.serviceActive) }
+                    ) {
+                        Icon(
+                            imageVector = if (settings.serviceActive) Icons.Default.Pause else Icons.Default.PlayArrow,
+                            contentDescription = "Iniciar", tint = Color.Black, modifier = Modifier.size(35.dp)
+                        )
+                    }
+                }
+            }
         }
 
         Card(
