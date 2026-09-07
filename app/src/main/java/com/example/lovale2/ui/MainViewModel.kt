@@ -12,6 +12,9 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import android.media.projection.MediaProjectionManager
+import android.content.Context
+import android.app.Activity
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -40,7 +43,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             context.stopService(serviceIntent)
         }
     }
-
+    fun solicitarPermisoCapturaPantalla(activity: Activity, requestCode: Int) {
+        val mediaProjectionManager = activity.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+        activity.startActivityForResult(mediaProjectionManager.createScreenCaptureIntent(), requestCode)
+    }
     fun setSelectedApp(app: RideApp) = viewModelScope.launch { repository.setSelectedApp(app) }
 
     fun setMinRateByHour(value: String) = viewModelScope.launch { repository.setMinRateByHour(value) }

@@ -1,104 +1,138 @@
 package com.example.lovale2.services
 
-import android.app.Notification
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
-import android.content.pm.ServiceInfo
-import android.os.Build
+import android.graphics.Bitmap
+import android.graphics.PixelFormat
+import android.hardware.display.DisplayManager
+import android.hardware.display.VirtualDisplay
+import android.media.ImageReader
+import android.media.projection.MediaProjection
+import android.media.projection.MediaProjectionManager
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.util.Log
-import androidx.core.app.NotificationCompat
-import com.example.lovale2.MainActivity
+import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.text.TextRecognition
+import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+import kotlinx.coroutines.*
+import java.nio.ByteBuffer
 
 class LoValeForegroundService : Service() {
 
     companion object {
-        const val CHANNEL_ID = "LoValeServiceChannel"
-        const val NOTIFICATION_ID = 1337
-        private const val TAG = "LoValeFGS"
+        private const val TAG = "LoValeForegroundService"
     }
 
-    override fun onCreate() {
-        super.onCreate()
-        createNotificationChannel()
-    }
+    private var mediaProjection: MediaProjection? = null
+    private var virtualDisplay: VirtualDisplay? = null
+    private var imageReader: ImageReader? = null
+    private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+    private val handler = Handler(Looper.getMainLooper())
+    private var isRunning = false
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val notification = createNotification("Monitoreando viajes de forma activa...")
+        Log.d(TAG, "Iniciando servicio de monitoreo LoVale...")
 
-        try {
-            // Android 14+ requires the FGS type to be supplied both in the
-            // manifest and to startForeground(). specialUse is only available
-            // from API 34, so never pass that type to older Android versions.
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                startForeground(
-                    NOTIFICATION_ID,
-                    notification,
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
-                )
-            } else {
-                startForeground(NOTIFICATION_ID, notification)
-            }
-        } catch (t: Throwable) {
-            // A failure here must not take down the AccessibilityService/app.
-            Log.e(TAG, "No se pudo iniciar el servicio en primer plano", t)
-            stopSelfResult(startId)
+        if (!ScreenCaptureHolder.isCapturing || ScreenCaptureHolder.resultData == null) {
+            Log.e(TAG, "No hay credenciales de MediaProjection válidas.")
+            stopSelf()
             return START_NOT_STICKY
         }
+
+        iniciarCapturaPantalla()
+        iniciarBucleDeEscaneo()
 
         return START_STICKY
     }
 
-    override fun onDestroy() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            stopForeground(STOP_FOREGROUND_REMOVE)
-        } else {
-            @Suppress("DEPRECATION")
-            stopForeground(true)
+    private fun iniciarCapturaPantalla() {
+        try {
+            val projectionManager = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+            mediaProjection = projectionManager.getMediaProjection(
+                ScreenCaptureHolder.resultCode,
+                ScreenCaptureHolder.resultData!!
+            )
+
+            val metrics = resources.displayMetrics
+            val width = metrics.widthPixels
+            val height = metrics.heightPixels
+            val density = metrics.densityDpi
+
+            imageReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
+            virtualDisplay = mediaProjection?.createVirtualDisplay(
+                "ScreenCapture",
+                width, height, density,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                imageReader?.surface, null, null
+            )
+            isRunning = true
+        } catch (e: Exception) {
+            Log.e(TAG, "Error al iniciar VirtualDisplay", e)
         }
+    }
+
+    private fun iniciarBucleDeEscaneo() {
+        serviceScope.launch {
+            while (isRunning) {
+                delay(2500) // Escanea la pantalla cada 2.5 segundos
+                capturarYAnalizarPantalla()
+            }
+        }
+    }
+
+    private fun capturarYAnalizarPantalla() {
+        val image = imageReader?.acquireLatestImage() ?: return
+        try {
+            val planes = image.planes
+            val buffer: ByteBuffer = planes[0].buffer
+            val pixelStride = planes[0].pixelStride
+            val rowStride = planes[0].rowStride
+            val rowPadding = rowStride - pixelStride * image.width
+
+            val bitmap = Bitmap.createBitmap(
+                image.width + rowPadding / pixelStride,
+                image.height,
+                Bitmap.Config.ARGB_8888
+            )
+            bitmap.copyPixelsFromBuffer(buffer)
+            image.close()
+
+            // Procesar con ML Kit OCR
+            procesarConMlKit(bitmap)
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Error al procesar frame de pantalla", e)
+            image.close()
+        }
+    }
+
+    private fun procesarConMlKit(bitmap: Bitmap) {
+        val inputImage = InputImage.fromBitmap(bitmap, 0)
+        recognizer.process(inputImage)
+            .addOnSuccessListener { visionText ->
+                val textoCompleto = visionText.text
+                if (textoCompleto.contains("$", ignoreCase = true) &&
+                    (textoCompleto.contains("km", ignoreCase = true) || textoCompleto.contains("min", ignoreCase = true))) {
+                    Log.d(TAG, "¡Viaje detectado en pantalla!\nContenido: $textoCompleto")
+                    // Aquí puedes disparar tu lógica de alertas o notificaciones si pasa tus filtros
+                }
+            }
+            .addOnFailureListener { e ->
+                Log.e(TAG, "Fallo en reconocimiento OCR", e)
+            }
+    }
+
+    override fun onDestroy() {
         super.onDestroy()
+        isRunning = false
+        serviceScope.cancel()
+        virtualDisplay?.release()
+        mediaProjection?.stop()
+        ScreenCaptureHolder.isCapturing = false
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
-
-    private fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
-
-        val channel = NotificationChannel(
-            CHANNEL_ID,
-            "Lo Vale - Servicio Activo",
-            NotificationManager.IMPORTANCE_LOW
-        ).apply {
-            description = "Mantiene activo el monitoreo de viajes de Lo Vale"
-            setShowBadge(false)
-        }
-
-        getSystemService(NotificationManager::class.java)?.createNotificationChannel(channel)
-    }
-
-    private fun createNotification(message: String): Notification {
-        val notificationIntent = Intent(this, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-        }
-
-        val pendingIntent = PendingIntent.getActivity(
-            this,
-            0,
-            notificationIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-
-        return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Lo Vale está activo 🚀")
-            .setContentText(message)
-            .setSmallIcon(android.R.drawable.ic_dialog_info)
-            .setContentIntent(pendingIntent)
-            .setOngoing(true)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
-            .setCategory(NotificationCompat.CATEGORY_SERVICE)
-            .build()
-    }
 }

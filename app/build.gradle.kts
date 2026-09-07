@@ -56,4 +56,8 @@ dependencies {
     debugImplementation(libs.androidx.compose.ui.tooling)
     implementation("com.squareup.retrofit2:retrofit:2.9.0")
     implementation("com.squareup.retrofit2:converter-gson:2.9.0")
+    // Google ML Kit Text Recognition (Latin)
+    implementation("com.google.mlkit:text-recognition:16.0.1")
+    // O alternativa usando Google Play Services:
+    // implementation 'com.google.android.gms:play-services-mlkit-text-recognition:19.0.1'
 }

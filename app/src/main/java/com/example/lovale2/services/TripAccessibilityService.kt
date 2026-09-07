@@ -46,8 +46,6 @@ class TripAccessibilityService : AccessibilityService() {
         super.onServiceConnected()
         Log.d(TAG, "Servicio de accesibilidad CONECTADO")
 
-        // El XML mantiene la capacidad de leer contenido, pero desde aquí
-        // restringimos dinámicamente los eventos al paquete elegido por el usuario.
         actualizarFiltroDePaquete(settingsCache.selectedApp)
 
         val repository = SettingsRepository(applicationContext)
@@ -65,7 +63,7 @@ class TripAccessibilityService : AccessibilityService() {
                 Log.d(
                     TAG,
                     "Configuración: activo=${settings.serviceActive}, app=${settings.selectedApp?.label ?: "NINGUNA"}, " +
-                        "minKm=${settings.minRateByKm}, minHora=${settings.minRateByHour}, pickupMax=${settings.maxPickupDistance}"
+                            "minKm=${settings.minRateByKm}, minHora=${settings.minRateByHour}, pickupMax=${settings.maxPickupDistance}"
                 )
             }
         }
@@ -75,7 +73,6 @@ class TripAccessibilityService : AccessibilityService() {
     private fun actualizarFiltroDePaquete(app: RideApp?) {
         val info = serviceInfo ?: return
         info.packageNames = if (app == null) emptyArray() else arrayOf(app.packageName)
-        // packageNames es una de las propiedades que Android permite cambiar en runtime.
         setServiceInfo(info)
     }
 
@@ -87,37 +84,30 @@ class TripAccessibilityService : AccessibilityService() {
         val targetPackage = selectedApp.packageName
         val eventPackage = event.packageName?.toString()?.lowercase(Locale.ROOT).orEmpty()
 
-        // Primera barrera: paquete exacto del evento.
         if (eventPackage != targetPackage) return
 
-        // Segunda barrera: obtenemos el nodo raíz para analizar.
-        // Si la ventana activa es de nuestra app, la usamos. Si no, pero el evento es de nuestra app
-        // (ej: un overlay), usamos el source del evento para no perder la oferta.
-        val activeRoot = rootInActiveWindow
-        val rootNode = if (activeRoot?.packageName?.toString()?.lowercase(Locale.ROOT) == targetPackage) {
-            activeRoot
-        } else {
-            event.source?.let { findRoot(it) }
+        val rootNode = rootInActiveWindow ?: return
+        val rootPackage = rootNode.packageName?.toString()?.lowercase(Locale.ROOT).orEmpty()
+        if (rootPackage.isNotBlank() && rootPackage != targetPackage) {
+            registrarCambioPrimerPlano("")
+            rootNode.recycle()
+            return
         }
 
-        if (rootNode == null) return
         registrarCambioPrimerPlano(targetPackage)
 
         val textos = mutableListOf<String>()
         try {
             recolectarTextos(rootNode, textos)
         } finally {
-            if (rootNode != activeRoot) rootNode.recycle()
-            // No reciclamos activeRoot porque rootInActiveWindow lo maneja el sistema,
-            // pero si lo obtuvimos vía event.source o findRoot, sí debemos.
+            rootNode.recycle()
         }
-        
+
         if (textos.isEmpty()) return
 
         val textoCompleto = textos.joinToString(" ").replace(Regex("\\s+"), " ").trim()
         if (textoCompleto.isBlank() || !esPantallaDeOfertas(selectedApp, textoCompleto)) return
 
-        // No hacemos RAW para otras apps y tampoco inundamos el log con cada evento.
         Log.d(TAG, "Pantalla de ofertas detectada: ${selectedApp.label} | texto=${textoCompleto.take(500)}")
 
         val ofertas = separarOfertas(textoCompleto, selectedApp)
@@ -143,7 +133,7 @@ class TripAccessibilityService : AccessibilityService() {
         if (!contieneOferta(texto, app)) return false
         return when (app) {
             RideApp.DIDI -> texto.contains("Centro", ignoreCase = true) || texto.contains("Aceptar", ignoreCase = true)
-            RideApp.UBER -> texto.contains("Viaje", ignoreCase = true) || texto.contains("Uber", ignoreCase = true) || texto.contains("recoger", ignoreCase = true)
+            RideApp.UBER -> true // Flexibilizado para Uber para evitar bloqueos por palabras clave rígidas
             RideApp.CABIFY -> texto.contains("app", ignoreCase = true) || texto.contains("/km", ignoreCase = true) || contarParesMinKm(texto) >= 2
         }
     }
@@ -202,17 +192,16 @@ class TripAccessibilityService : AccessibilityService() {
             if (candidatas.isNotEmpty()) return candidatas
         }
 
-        // Uber/Cabify suelen mostrar una sola oferta.
         return if (contieneOferta(texto, app)) listOf(texto) else emptyList()
     }
 
     private fun contieneOferta(texto: String, app: RideApp? = null): Boolean {
         val tienePrecio = Regex("""(?:\$|ARS)\s*[0-9]""", RegexOption.IGNORE_CASE).containsMatchIn(texto)
-        val pares = contarParesMinKm(texto)
-        // Para Uber permitimos 1 solo par (min/km) porque a veces la info de recogida 
-        // tarda en aparecer o viene en otro nodo. Para el resto mantenemos 2.
-        return if (app == RideApp.UBER) tienePrecio && pares >= 1
-        else tienePrecio && pares >= 2
+        return if (app == RideApp.UBER) {
+            tienePrecio && (texto.contains("min", ignoreCase = true) || texto.contains("km", ignoreCase = true) || texto.contains("m", ignoreCase = true))
+        } else {
+            tienePrecio && contarParesMinKm(texto) >= 2
+        }
     }
 
     private fun contarParesMinKm(texto: String): Int {
@@ -230,7 +219,7 @@ class TripAccessibilityService : AccessibilityService() {
             RegexOption.IGNORE_CASE
         )
         val matches = pairRegex.findAll(texto).toList()
-        if (matches.size < 2) return emptyList()
+        if (matches.isEmpty()) return emptyList()
 
         val resultado = mutableListOf<String>()
         for (i in matches.indices) {
@@ -241,12 +230,19 @@ class TripAccessibilityService : AccessibilityService() {
         }
 
         if (resultado.size >= 2) return listOf(resultado.first() to resultado.last())
+        if (resultado.size == 1 && resultado.first().isNotBlank()) return listOf(resultado.first() to resultado.first())
 
         val direcciones = texto
             .split(Regex("(?i)\\b(?:A|Viaje|Express|Express Nuevo|Aceptar)\\b|\$|ARS"))
             .map { limpiarDireccion(it) }
             .filter(::looksLikeAddress)
-        return if (direcciones.size >= 2) listOf(direcciones.first() to direcciones.last()) else emptyList()
+        return if (direcciones.size >= 2) {
+            listOf(direcciones.first() to direcciones.last())
+        } else if (direcciones.size == 1) {
+            listOf(direcciones.first() to direcciones.first())
+        } else {
+            emptyList()
+        }
     }
 
     private fun limpiarDireccion(value: String): String = value
@@ -257,13 +253,13 @@ class TripAccessibilityService : AccessibilityService() {
 
     private fun looksLikeAddress(value: String): Boolean {
         val text = value.trim()
-        if (text.length < 8 || text.length > 180) return false
+        if (text.length < 4 || text.length > 180) return false
         if (text.contains("$") || text.contains("ARS", ignoreCase = true)) return false
         if (Regex("(?i)^(Aceptar|Express|Express Nuevo|Cabify|Uber|DiDi)").containsMatchIn(text)) return false
         return text.any { it.isLetter() } && (
-            text.any { it.isDigit() } ||
-                Regex("palermo|belgrano|almagro|balvanera|boedo|caballito|once|retiro|constitucion|villa|san telmo|flores|recoleta|nuñez|paternal|chacarita|lanus|valentin alsina", RegexOption.IGNORE_CASE).containsMatchIn(text)
-            )
+                text.any { it.isDigit() } ||
+                        Regex("palermo|belgrano|almagro|balvanera|boedo|caballito|once|retiro|constitucion|villa|san telmo|flores|recoleta|nuñez|paternal|chacarita|lanus|valentin alsina", RegexOption.IGNORE_CASE).containsMatchIn(text)
+                )
     }
 
     private fun recolectarTextos(node: AccessibilityNodeInfo, destino: MutableList<String>) {
@@ -275,17 +271,6 @@ class TripAccessibilityService : AccessibilityService() {
                 try { recolectarTextos(c, destino) } finally { c.recycle() }
             }
         }
-    }
-
-    private fun findRoot(node: AccessibilityNodeInfo): AccessibilityNodeInfo {
-        var current = AccessibilityNodeInfo.obtain(node)
-        while (true) {
-            val parent = current.parent
-            if (parent == null) break
-            current.recycle()
-            current = parent
-        }
-        return current
     }
 
     private fun buildFingerprint(packageName: String, datos: DatosViaje, evaluacion: ResultadoEvaluacion): String =
